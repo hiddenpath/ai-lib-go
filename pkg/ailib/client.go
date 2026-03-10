@@ -1,6 +1,5 @@
-// Package ailib - ai-lib-go 主入口
-// Official Go Runtime for AI-Protocol
-
+// Package ailib client implementation.
+// 客户端实现，基于协议驱动统一请求构造。
 package ailib
 
 import (
@@ -11,406 +10,546 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/hiddenpath/ai-lib-go/internal/protocol"
+	"github.com/hiddenpath/ai-lib-go/internal/resilience"
+	"github.com/hiddenpath/ai-lib-go/internal/stream"
 )
 
-// Version is the library version.
-const Version = "0.5.0"
-
-// client implements the Client interface.
 type client struct {
-	manifest interface{} // v1.ProviderManifest or v2.ProviderManifest
-	loader   *protocol.Loader
-	http     *http.Client
-	apiKey   string
-	baseURL  string
-	headers  map[string]string
+	manifest   any
+	baseURL    string
+	apiKey     string
+	headers    map[string]string
+	maxRetries int
+	http       *http.Client
 }
 
-// newClient creates a new client.
-func newClient(b *ClientBuilder) (Client, error) {
-	c := &client{
-		loader: protocol.NewLoader(),
-		http: &http.Client{
-			Timeout: time.Duration(b.timeout) * time.Second,
-		},
-		apiKey:  b.apiKey,
-		headers: b.headers,
-	}
+func newClient(b *ClientBuilder, httpClient *http.Client) (*client, error) {
+	l := protocol.NewLoader()
+	var manifest any
+	var err error
 
-	// Load protocol
-	if b.protocolData != nil {
-		manifest, err := c.loader.LoadFromData(b.protocolData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load protocol data: %w", err)
-		}
-		c.manifest = manifest
-	}
-
-	// Set base URL
-	if b.baseURL != "" {
-		c.baseURL = b.baseURL
-	} else if c.manifest != nil {
-		endpoint, err := protocol.GetEndpoint(c.manifest)
+	if len(b.protocolData) > 0 {
+		manifest, err = l.LoadBytes(b.protocolData, ".yaml")
 		if err != nil {
 			return nil, err
 		}
-		c.baseURL = endpoint
+	} else if b.protocolPath != "" {
+		manifest, err = l.LoadFile(b.protocolPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return c, nil
+	baseURL := b.baseURL
+	if baseURL == "" && manifest != nil {
+		baseURL, err = protocol.BaseURL(manifest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("resolved baseURL is empty")
+	}
+
+	return &client{
+		manifest:   manifest,
+		baseURL:    baseURL,
+		apiKey:     b.apiKey,
+		headers:    b.headers,
+		maxRetries: b.maxRetries,
+		http:       httpClient,
+	}, nil
 }
 
-// Chat performs a synchronous chat completion.
-func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*ChatResponse, error) {
-	if opts == nil {
-		opts = &ChatOptions{}
-	}
-
-	// Build request
-	reqBody := c.buildRequest(messages, opts)
-	reqBody["stream"] = false
-
-	reqBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	// Build HTTP request
-	url := c.baseURL + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send request
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check for errors
-	if resp.StatusCode >= 400 {
-		return nil, c.parseError(resp)
-	}
-
-	// Parse response
-	var response ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// ChatStream performs a streaming chat completion.
-func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatOptions) (Stream, error) {
-	if opts == nil {
-		opts = &ChatOptions{}
-	}
-
-	// Build request
-	reqBody := c.buildRequest(messages, opts)
-	reqBody["stream"] = true
-
-	reqBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	// Build HTTP request
-	url := c.baseURL + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json"
-
-)
-	// Send request
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-
-	// Check for errors
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		return nil, c.parseError(resp)
-	}
-
-	// Create stream reader
-	return newSSEStream(resp.Body), nil
-}
-
-// Close releases resources.
 func (c *client) Close() error {
 	c.http.CloseIdleConnections()
 	return nil
 }
 
-// buildRequest builds the request body.
-func (c *client) buildRequest(messages []Message, opts *ChatOptions) map[string]interface{} {
-	req := make(map[string]interface{})
-
-	// Model
-	if opts.Model != "" {
-		req["model"] = opts.Model
+func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*ChatResponse, error) {
+	if len(messages) == 0 {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "messages must not be empty"}
 	}
-
-	// Messages
-	req["messages"] = c.convertMessages(messages)
-
-	// Options
+	if opts == nil {
+		opts = &ChatOptions{}
+	}
+	payload := map[string]any{
+		"messages": messages,
+		"stream":   false,
+	}
+	if opts.Model != "" {
+		payload["model"] = opts.Model
+	}
 	if opts.Temperature != nil {
-		req["temperature"] = *opts.Temperature
+		payload["temperature"] = *opts.Temperature
 	}
 	if opts.MaxTokens != nil {
-		req["max_tokens"] = *opts.MaxTokens
+		payload["max_tokens"] = *opts.MaxTokens
 	}
 	if opts.TopP != nil {
-		req["top_p"] = *opts.TopP
-	}
-	if opts.FrequencyPenalty != nil {
-		req["frequency_penalty"] = *opts.FrequencyPenalty
-	}
-	if opts.PresencePenalty != nil {
-		req["presence_penalty"] = *opts.PresencePenalty
-	}
-	if len(opts.Stop) > 0 {
-		req["stop"] = opts.Stop
+		payload["top_p"] = *opts.TopP
 	}
 	if len(opts.Tools) > 0 {
-		req["tools"] = opts.Tools
+		payload["tools"] = opts.Tools
 	}
 	if opts.ToolChoice != nil {
-		req["tool_choice"] = opts.ToolChoice
-	}
-	if opts.ResponseFormat != nil {
-		req["response_format"] = opts.ResponseFormat
-	}
-	if opts.User != "" {
-		req["user"] = opts.User
-	}
-	if opts.Seed != nil {
-		req["seed"] = *opts.Seed
+		payload["tool_choice"] = opts.ToolChoice
 	}
 
-	return req
+	path, method := protocol.EndpointFor(c.manifest, "chat_completions", "/chat/completions")
+	var out ChatResponse
+	if err := c.sendJSON(ctx, method, path, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
-// convertMessages converts messages to API format.
-func (c *client) convertMessages(messages []Message) []interface{} {
-	result := make([]interface{}, len(messages))
-	for i, msg := range messages {
-		m := map[string]interface{}{
-			"role": string(msg.Role),
-		}
-
-		// Handle content
-		switch content := msg.Content.(type) {
-		case TextContent:
-			m["content"] = content.Text
-		case MultiContent:
-			m["content"] = content
-		}
-
-		if msg.Name != "" {
-			m["name"] = msg.Name
-		}
-		if len(msg.ToolCalls) > 0 {
-			m["tool_calls"] = msg.ToolCalls
-		}
-		if msg.ToolCallID != "" {
-			m["tool_call_id"] = msg.ToolCallID
-		}
-
-		result[i] = m
+func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatOptions) (Stream, error) {
+	if len(messages) == 0 {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "messages must not be empty"}
 	}
-	return result
+	if opts == nil {
+		opts = &ChatOptions{}
+	}
+	payload := map[string]any{
+		"messages": messages,
+		"stream":   true,
+	}
+	if opts.Model != "" {
+		payload["model"] = opts.Model
+	}
+	path, method := protocol.EndpointFor(c.manifest, "chat_completions", "/chat/completions")
+	req, err := c.newRequest(ctx, method, path, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		return nil, parseHTTPError(c.manifest, resp)
+	}
+	return &sseStream{
+		body:    resp.Body,
+		decoder: stream.NewSSEDecoder(resp.Body),
+	}, nil
 }
 
-// setHeaders sets authentication and custom headers.
+func (c *client) Embeddings(ctx context.Context, req EmbeddingRequest) (*EmbeddingResponse, error) {
+	if err := c.requireCapability("embeddings"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "embeddings", "/embeddings")
+	var out EmbeddingResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) BatchCreate(ctx context.Context, req BatchCreateRequest) (*BatchJob, error) {
+	if err := c.requireCapability("batch"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "batch_create", "/batches")
+	var out BatchJob
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) BatchGet(ctx context.Context, batchID string) (*BatchJob, error) {
+	if err := c.requireCapability("batch"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(batchID) == "" {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "batchID must not be empty"}
+	}
+	pathTpl, method := protocol.EndpointFor(c.manifest, "batch_get", "/batches/{id}")
+	path := strings.ReplaceAll(pathTpl, "{id}", batchID)
+	req, err := c.newRequest(ctx, method, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out BatchJob
+	if err := c.execute(req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) BatchCancel(ctx context.Context, batchID string) (*BatchJob, error) {
+	if err := c.requireCapability("batch"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(batchID) == "" {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "batchID must not be empty"}
+	}
+	pathTpl, method := protocol.EndpointFor(c.manifest, "batch_cancel", "/batches/{id}/cancel")
+	path := strings.ReplaceAll(pathTpl, "{id}", batchID)
+	var out BatchJob
+	if err := c.sendJSON(ctx, method, path, map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) STTTranscribe(ctx context.Context, req STTRequest) (*STTResponse, error) {
+	if err := c.requireCapability("stt"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "audio_transcriptions", "/audio/transcriptions")
+	var out STTResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) TTSSpeak(ctx context.Context, req TTSRequest) (*TTSResponse, error) {
+	if err := c.requireCapability("tts"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "audio_speech", "/audio/speech")
+	httpReq, err := c.newRequest(ctx, method, path, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var out TTSResponse
+	err = resilience.Execute(ctx, resilience.DefaultPolicy(), func(_ context.Context) error {
+		resp, reqErr := c.http.Do(httpReq)
+		if reqErr != nil {
+			return reqErr
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return parseHTTPError(c.manifest, resp)
+		}
+		b, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return readErr
+		}
+		out = TTSResponse{
+			AudioData: b,
+			MimeType:  resp.Header.Get("Content-Type"),
+		}
+		return nil
+	}, isRetryableErr)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) Rerank(ctx context.Context, req RerankRequest) (*RerankResponse, error) {
+	if err := c.requireCapability("reranking"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "rerank", "/rerank")
+	var out RerankResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) MCPListTools(ctx context.Context) (*MCPListToolsResponse, error) {
+	if err := c.requireCapability("mcp"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "mcp_list_tools", "/mcp/tools/list")
+	var out MCPListToolsResponse
+	if err := c.sendJSON(ctx, method, path, map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) MCPCallTool(ctx context.Context, req MCPCallToolRequest) (*MCPCallToolResponse, error) {
+	if err := c.requireCapability("mcp"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "mcp_call_tool", "/mcp/tools/call")
+	var out MCPCallToolResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) ComputerUse(ctx context.Context, req ComputerUseRequest) (*ComputerUseResponse, error) {
+	if err := c.requireCapability("computer_use"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "computer_use", "/computer-use/actions")
+	var out ComputerUseResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) Reason(ctx context.Context, req ReasoningRequest) (*ReasoningResponse, error) {
+	if err := c.requireCapability("reasoning"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "reasoning", "/reasoning")
+	var out ReasoningResponse
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) VideoGenerate(ctx context.Context, req VideoGenerateRequest) (*VideoJob, error) {
+	if err := c.requireCapability("video"); err != nil {
+		return nil, err
+	}
+	path, method := protocol.EndpointFor(c.manifest, "video_generate", "/video/generations")
+	var out VideoJob
+	if err := c.sendJSON(ctx, method, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) VideoGet(ctx context.Context, jobID string) (*VideoJob, error) {
+	if err := c.requireCapability("video"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(jobID) == "" {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "jobID must not be empty"}
+	}
+	pathTpl, method := protocol.EndpointFor(c.manifest, "video_get", "/video/generations/{id}")
+	path := strings.ReplaceAll(pathTpl, "{id}", jobID)
+	req, err := c.newRequest(ctx, method, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out VideoJob
+	if err := c.execute(req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) sendJSON(ctx context.Context, method, path string, payload any, out any) error {
+	req, err := c.newRequest(ctx, method, path, payload)
+	if err != nil {
+		return err
+	}
+	return c.execute(req, out)
+}
+
+func (c *client) newRequest(ctx context.Context, method, path string, payload any) (*http.Request, error) {
+	if err := validateRequestMeta(method, path); err != nil {
+		return nil, err
+	}
+	var body io.Reader
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+	return req, nil
+}
+
 func (c *client) setHeaders(req *http.Request) {
-	// Set API key
-	if c.apiKey != "" {
-		authType := "bearer"
-		if c.manifest != nil {
-			if t, err := protocol.GetAuthType(c.manifest); err == nil && t != "" {
-				authType = t
-			}
-		}
-
-		switch authType {
-		case "bearer":
-			req.Header.Set("Authorization", "Bearer "+c.apiKey)
-		case "api_key", "header":
-			req.Header.Set("Authorization", c.apiKey)
-		}
-	}
-
-	// Set custom headers
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
+	if c.apiKey == "" {
+		return
+	}
+	name := "Authorization"
+	prefix := "Bearer "
+	if c.manifest != nil {
+		if h, p, err := protocol.AuthHeader(c.manifest); err == nil {
+			name, prefix = h, p
+		}
+	}
+	req.Header.Set(name, prefix+c.apiKey)
 }
 
-// parseError parses an error response.
-func (c *client) parseError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
+func (c *client) execute(req *http.Request, out any) error {
+	ctx := req.Context()
+	p := resilience.DefaultPolicy()
+	if c.maxRetries > 0 {
+		p.MaxAttempts = c.maxRetries
+	} else if m, ok := protocol.RetryMaxAttempts(c.manifest); ok {
+		p.MaxAttempts = m
+	}
+
+	return resilience.Execute(ctx, p, func(_ context.Context) error {
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return parseHTTPError(c.manifest, resp)
+		}
+		if out == nil {
+			return nil
+		}
+		return json.NewDecoder(resp.Body).Decode(out)
+	}, isRetryableErr)
+}
+
+func parseHTTPError(manifest any, resp *http.Response) error {
+	b, _ := io.ReadAll(resp.Body)
+	body := strings.TrimSpace(string(b))
+	code := classifyStatus(resp.StatusCode)
+	pCode, pType := extractProviderErrorTokens(b)
+	if c, ok := protocol.ClassifyError(manifest, resp.StatusCode, pCode, pType); ok {
+		code = c
+	} else if c, ok := classifyProviderErrorCode(code, b); ok {
+		code = c
+	}
 	return &APIError{
+		Code:       code,
 		StatusCode: resp.StatusCode,
-		Message:    string(body),
+		Message:    body,
 	}
 }
 
-// APIError represents an API error.
-type APIError struct {
-	StatusCode int
-	Code       string
-	Message    string
+func extractProviderErrorTokens(body []byte) (code, kind string) {
+	type nestedError struct {
+		Code string `json:"code"`
+		Type string `json:"type"`
+	}
+	type errorBody struct {
+		Error nestedError `json:"error"`
+	}
+	var parsed errorBody
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(parsed.Error.Code), strings.TrimSpace(parsed.Error.Type)
 }
 
-func (e *APIError) Error() string {
-	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+func (c *client) requireCapability(name string) error {
+	if c.manifest == nil {
+		return nil
+	}
+	if protocol.HasCapability(c.manifest, name) {
+		return nil
+	}
+	return &APIError{
+		Code:       ErrUnsupported,
+		StatusCode: 400,
+		Message:    "capability not declared in protocol manifest: " + name,
+	}
 }
 
-// Standard error codes (E1001-E9999)
-const (
-	ErrInvalidRequest  = "E1001"
-	ErrAuthentication  = "E1002"
-	ErrPermission      = "E1003"
-	ErrNotFound        = "E1004"
-	ErrRateLimited     = "E2001"
-	ErrQuotaExhausted  = "E2002"
-	ErrServerOverload  = "E3001"
-	ErrInternalError   = "E3002"
-	ErrTimeout         = "E3003"
-)
+func isRetryableErr(err error) bool {
+	e, ok := err.(*APIError)
+	if !ok {
+		return true
+	}
+	return e.Code == ErrRateLimited || e.Code == ErrServerError || e.Code == ErrOverloaded || e.Code == ErrTimeout || e.Code == ErrConflict
+}
 
-// sseStream implements Stream for SSE responses.
+func isFallbackableErr(err error) bool {
+	e, ok := err.(*APIError)
+	if !ok {
+		return true
+	}
+	switch e.Code {
+	case ErrAuthentication, ErrRateLimited, ErrQuotaExhausted, ErrServerError, ErrOverloaded, ErrTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateRequestMeta(method, path string) error {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "endpoint path must start with /"}
+	}
+	switch strings.ToUpper(method) {
+	case "GET", "POST", "DELETE":
+		return nil
+	default:
+		return &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "unsupported HTTP method: " + method}
+	}
+}
+
+func classifyProviderErrorCode(defaultCode string, body []byte) (string, bool) {
+	type nestedError struct {
+		Code string `json:"code"`
+		Type string `json:"type"`
+	}
+	type errorBody struct {
+		Error nestedError `json:"error"`
+	}
+	var parsed errorBody
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", false
+	}
+	raw := strings.TrimSpace(parsed.Error.Code)
+	if raw == "" {
+		raw = strings.TrimSpace(parsed.Error.Type)
+	}
+	switch raw {
+	case "invalid_api_key", "authentication_error":
+		return ErrAuthentication, true
+	case "model_not_found":
+		return ErrNotFound, true
+	case "context_length_exceeded":
+		return ErrUnsupported, true
+	case "insufficient_quota":
+		return ErrQuotaExhausted, true
+	case "overloaded", "overloaded_error":
+		return ErrOverloaded, true
+	case "conflict":
+		return ErrConflict, true
+	case "cancelled":
+		return ErrCancelled, true
+	default:
+		return defaultCode, true
+	}
+}
+
 type sseStream struct {
-	reader   io.ReadCloser
-	decoder  *json.Decoder
-	event    StreamingEvent
-	err      error
-	done     bool
-	buffer   []byte
-}
-
-func newSSEStream(reader io.ReadCloser) *sseStream {
-	return &sseStream{
-		reader:  reader,
-		decoder: json.NewDecoder(reader),
-	}
+	body    io.ReadCloser
+	decoder *stream.Decoder
+	current StreamingEvent
+	err     error
 }
 
 func (s *sseStream) Next() bool {
-	if s.done {
+	ev, ok, err := s.decoder.Next()
+	if err != nil {
+		s.err = err
 		return false
 	}
-
-	for {
-		// Read next line
-		line, err := s.readLine()
-		if err != nil {
-			if err == io.EOF {
-				s.done = true
-				return false
-			}
-			s.err = err
-			s.done = true
-			return false
-		}
-
-		// Skip empty lines
-		if len(line) == 0 {
-			continue
-		}
-
-		// Check for data prefix
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-
-		// Check for terminal
-		if data == "[DONE]" {
-			s.done = true
-			return false
-		}
-
-		// Parse JSON
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content   string     `json:"content"`
-					Role      string     `json:"role"`
-					ToolCalls []ToolCall `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-		}
-
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			// Try to continue on parse errors
-			continue
-		}
-
-		if len(chunk.Choices) > 0 {
-			choice := chunk.Choices[0]
-			s.event = StreamingEvent{
-				Type:         "PartialContentDelta",
-				Delta:        choice.Delta.Content,
-				FinishReason: choice.FinishReason,
-			}
-			if len(choice.Delta.ToolCalls) > 0 {
-				s.event.ToolCall = &choice.Delta.ToolCalls[0]
-			}
-			return true
-		}
+	if !ok {
+		return false
 	}
-}
-
-func (s *sseStream) readLine() (string, error) {
-	for {
-		if len(s.buffer) > 0 {
-			idx := bytes.IndexByte(s.buffer, '\n')
-			if idx >= 0 {
-				line := string(s.buffer[:idx])
-				s.buffer = s.buffer[idx+1:]
-				return strings.TrimSpace(line), nil
-			}
-		}
-
-		buf := make([]byte, 1024)
-		n, err := s.reader.Read(buf)
-		if err != nil {
-			return "", err
-		}
-		s.buffer = append(s.buffer, buf[:n]...)
+	s.current = StreamingEvent{
+		Type:         ev.Type,
+		Delta:        ev.Delta,
+		FinishReason: ev.FinishReason,
 	}
+	return true
 }
 
-func (s *sseStream) Event() StreamingEvent {
-	return s.event
-}
-
-func (s *sseStream) Err() error {
-	return s.err
-}
-
-func (s *sseStream) Close() error {
-	return s.reader.Close()
-}
+func (s *sseStream) Event() StreamingEvent { return s.current }
+func (s *sseStream) Err() error            { return s.err }
+func (s *sseStream) Close() error          { return s.body.Close() }

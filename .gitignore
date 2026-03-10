@@ -1,45 +1,22 @@
 # Binaries
 *.exe
-*.exe~
 *.dll
 *.so
 *.dylib
-bin/
 
-# Test binaries
+# Go
 *.test
-
-# Output of go coverage
 *.out
-coverage.html
-coverage.txt
-
-# Go workspace
+coverage.*
 go.work
 go.work.sum
-
-# Dependency directories
 vendor/
 
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
-*~
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Env files
+# Env and logs
 .env
-.env.local
-*.env
-
-# Logs
+.env.*
 *.log
-
-# Temp files
-tmp/
-temp/
