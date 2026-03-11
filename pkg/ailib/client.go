@@ -134,9 +134,13 @@ func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatO
 		defer resp.Body.Close()
 		return nil, parseHTTPError(c.manifest, resp)
 	}
+	format := "openai_sse"
+	if c.manifest != nil {
+		format = protocol.StreamingDecoderFormat(c.manifest)
+	}
 	return &sseStream{
 		body:    resp.Body,
-		decoder: stream.NewSSEDecoder(resp.Body),
+		decoder: stream.NewDecoderWithFormat(resp.Body, format),
 	}, nil
 }
 
@@ -462,7 +466,7 @@ func isRetryableErr(err error) bool {
 	if !ok {
 		return true
 	}
-	return e.Code == ErrRateLimited || e.Code == ErrServerError || e.Code == ErrOverloaded || e.Code == ErrTimeout || e.Code == ErrConflict
+	return IsRetryableCode(e.Code)
 }
 
 func isFallbackableErr(err error) bool {
@@ -470,12 +474,7 @@ func isFallbackableErr(err error) bool {
 	if !ok {
 		return true
 	}
-	switch e.Code {
-	case ErrAuthentication, ErrRateLimited, ErrQuotaExhausted, ErrServerError, ErrOverloaded, ErrTimeout:
-		return true
-	default:
-		return false
-	}
+	return IsFallbackableCode(e.Code)
 }
 
 func validateRequestMeta(method, path string) error {

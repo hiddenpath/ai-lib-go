@@ -29,9 +29,9 @@ func complianceDir() string {
 		return v
 	}
 	candidates := []string{
-		filepath.Clean("D:/ai-protocol/tests/compliance"),
 		filepath.Clean("../../../ai-protocol/tests/compliance"),
 		filepath.Clean("../../../../ai-protocol/tests/compliance"),
+		filepath.Clean("../../../../tests/compliance"),
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && st.IsDir() {
@@ -180,8 +180,8 @@ func runErrorClassification(tc testCase, root string) error {
 	status := asInt(tc.Input["http_status"])
 	body, _ := tc.Input["response_body"].(map[string]any)
 	code, name := classify(status, body)
-	retryable := isRetryable(code)
-	fallbackable := isFallbackable(code)
+	retryable := ailib.IsRetryableCode(code)
+	fallbackable := ailib.IsFallbackableCode(code)
 
 	if exp, ok := tc.Expected["error_code"].(string); ok && exp != code {
 		return fmt.Errorf("error_code expected %s got %s", exp, code)
@@ -393,15 +393,10 @@ func runFallbackDecision(tc testCase) error {
 
 func fallbackableByCode(code string, err error) bool {
 	if code != "" {
-		switch code {
-		case "E1002", "E2001", "E2002", "E3001", "E3002", "E3003":
-			return true
-		default:
-			return false
-		}
+		return ailib.IsFallbackableCode(code)
 	}
 	if e, ok := err.(*ailib.APIError); ok {
-		return fallbackableByCode(e.Code, nil)
+		return ailib.IsFallbackableCode(e.Code)
 	}
 	return true
 }
@@ -604,8 +599,6 @@ func classify(status int, response map[string]any) (code string, name string) {
 		if rawProviderCode == "" {
 			rawProviderCode = asString(e["type"])
 		}
-	} else if e, ok := response["error"].(map[string]any); ok {
-		rawProviderCode = asString(e["type"])
 	}
 
 	switch rawProviderCode {
@@ -642,24 +635,6 @@ func classify(status int, response map[string]any) (code string, name string) {
 		return "E3003", "timeout"
 	default:
 		return "E9999", "unknown"
-	}
-}
-
-func isRetryable(code string) bool {
-	switch code {
-	case "E2001", "E3001", "E3002", "E3003":
-		return true
-	default:
-		return false
-	}
-}
-
-func isFallbackable(code string) bool {
-	switch code {
-	case "E1002", "E2001", "E2002", "E3001", "E3002", "E3003":
-		return true
-	default:
-		return false
 	}
 }
 

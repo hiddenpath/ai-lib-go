@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed (2026-03-11, GO-001 Constitution Compliance)
+
+- **ARCH-002**: Manifest-driven streaming decoder — `StreamingDecoderFormat()`, `NewDecoderWithFormat()` support openai_sse and anthropic_sse.
+- **ARCH-003**: Unified retry/fallback semantics — exported `IsRetryableCode`/`IsFallbackableCode`; E2002 aligned per constitution.
+- **TEST-001**: Removed portable path violation — dropped `D:/` hardcoded path; added `../../../../tests/compliance` candidate.
+- **P1**: Fixed duplicate `response["error"]` branch in compliance classify; downgraded go.mod to Go 1.21.
+- **Docs**: Refactored README.md and README_CN.md to align with ai-lib-rust, ai-lib-python, ai-lib-ts structure.
+
 ### Added
 
 - Full repository reset for Go runtime rearchitecture baseline.

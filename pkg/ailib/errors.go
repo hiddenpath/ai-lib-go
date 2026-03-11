@@ -34,6 +34,28 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("[%s] status=%d message=%s", e.Code, e.StatusCode, e.Message)
 }
 
+// IsRetryableCode returns true if the error code is retryable per ARCH-003.
+// Canonical implementation for cross-runtime consistency.
+func IsRetryableCode(code string) bool {
+	switch code {
+	case ErrRateLimited, ErrQuotaExhausted, ErrServerError, ErrOverloaded, ErrTimeout, ErrConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsFallbackableCode returns true if the error code is fallbackable per ARCH-003.
+// Canonical implementation for cross-runtime consistency.
+func IsFallbackableCode(code string) bool {
+	switch code {
+	case ErrAuthentication, ErrRateLimited, ErrQuotaExhausted, ErrServerError, ErrOverloaded, ErrTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
 func classifyStatus(status int) string {
 	switch status {
 	case 400:

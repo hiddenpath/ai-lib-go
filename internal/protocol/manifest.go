@@ -5,15 +5,25 @@ package protocol
 import "fmt"
 
 type V1Manifest struct {
-	ID              string       `yaml:"id" json:"id"`
-	ProtocolVersion string       `yaml:"protocol_version" json:"protocol_version"`
-	BaseURL         string       `yaml:"base_url" json:"base_url"`
-	APIFormat       string       `yaml:"api_format" json:"api_format"`
-	Capabilities    []string     `yaml:"capabilities" json:"capabilities"`
-	ErrorClass      ErrorClass   `yaml:"error_classification" json:"error_classification"`
-	RetryPolicy     RetryPolicy  `yaml:"retry_policy" json:"retry_policy"`
-	Auth            V1Auth       `yaml:"auth" json:"auth"`
-	Endpoints       []V1Endpoint `yaml:"endpoints" json:"endpoints"`
+	ID              string           `yaml:"id" json:"id"`
+	ProtocolVersion string           `yaml:"protocol_version" json:"protocol_version"`
+	BaseURL         string           `yaml:"base_url" json:"base_url"`
+	APIFormat       string           `yaml:"api_format" json:"api_format"`
+	Capabilities    []string         `yaml:"capabilities" json:"capabilities"`
+	ErrorClass      ErrorClass       `yaml:"error_classification" json:"error_classification"`
+	RetryPolicy     RetryPolicy      `yaml:"retry_policy" json:"retry_policy"`
+	Auth            V1Auth           `yaml:"auth" json:"auth"`
+	Endpoints       []V1Endpoint     `yaml:"endpoints" json:"endpoints"`
+	Streaming       *StreamingConfig `yaml:"streaming" json:"streaming"`
+}
+
+type StreamingConfig struct {
+	Decoder *DecoderConfig `yaml:"decoder" json:"decoder"`
+}
+
+type DecoderConfig struct {
+	Format   string `yaml:"format" json:"format"`
+	Strategy string `yaml:"strategy" json:"strategy"`
 }
 
 type V1Auth struct {
@@ -30,12 +40,13 @@ type V1Endpoint struct {
 }
 
 type V2Manifest struct {
-	ID              string      `yaml:"id" json:"id"`
-	ProtocolVersion string      `yaml:"protocol_version" json:"protocol_version"`
-	Core            V2Core      `yaml:"core" json:"core"`
-	ErrorClass      ErrorClass  `yaml:"error_classification" json:"error_classification"`
-	RetryPolicy     RetryPolicy `yaml:"retry_policy" json:"retry_policy"`
-	Capabilities    V2Caps      `yaml:"capabilities" json:"capabilities"`
+	ID              string           `yaml:"id" json:"id"`
+	ProtocolVersion string           `yaml:"protocol_version" json:"protocol_version"`
+	Core            V2Core           `yaml:"core" json:"core"`
+	ErrorClass      ErrorClass       `yaml:"error_classification" json:"error_classification"`
+	RetryPolicy     RetryPolicy      `yaml:"retry_policy" json:"retry_policy"`
+	Capabilities    V2Caps           `yaml:"capabilities" json:"capabilities"`
+	Streaming       *StreamingConfig `yaml:"streaming" json:"streaming"`
 }
 
 type V2Core struct {
@@ -281,4 +292,29 @@ func upperOrPOST(m string) string {
 		return "DELETE"
 	}
 	return "POST"
+}
+
+// StreamingDecoderFormat returns the decoder format from manifest for ARCH-002.
+// Supports "openai_sse", "anthropic_sse", "sse" (defaults to openai_sse).
+func StreamingDecoderFormat(m any) string {
+	var format, strategy string
+	switch v := m.(type) {
+	case *V1Manifest:
+		if v.Streaming != nil && v.Streaming.Decoder != nil {
+			format, strategy = v.Streaming.Decoder.Format, v.Streaming.Decoder.Strategy
+		}
+	case *V2Manifest:
+		if v.Streaming != nil && v.Streaming.Decoder != nil {
+			format, strategy = v.Streaming.Decoder.Format, v.Streaming.Decoder.Strategy
+		}
+	default:
+		return "openai_sse"
+	}
+	if format == "anthropic_sse" || strategy == "anthropic_event_stream" {
+		return "anthropic_sse"
+	}
+	if format == "openai_sse" || format == "sse" || strategy == "openai_chat" {
+		return "openai_sse"
+	}
+	return "openai_sse"
 }

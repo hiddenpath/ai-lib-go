@@ -209,10 +209,10 @@ func TestProviderErrorClassificationAndFallbackMatrix(t *testing.T) {
 	if apiErr.Code != ErrQuotaExhausted {
 		t.Fatalf("code expected %s got %s", ErrQuotaExhausted, apiErr.Code)
 	}
-	if isRetryableErr(apiErr) {
-		t.Fatalf("quota exhausted should be non-retryable in current fixture baseline")
+	if !IsRetryableCode(apiErr.Code) {
+		t.Fatalf("quota exhausted should be retryable per ARCH-003")
 	}
-	if !isFallbackableErr(apiErr) {
+	if !IsFallbackableCode(apiErr.Code) {
 		t.Fatalf("quota exhausted should be fallbackable")
 	}
 }

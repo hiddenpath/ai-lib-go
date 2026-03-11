@@ -19,10 +19,21 @@ type Event struct {
 
 type Decoder struct {
 	reader *bufio.Reader
+	format string
 }
 
+// NewSSEDecoder creates a decoder with default openai_sse format (backward compatible).
 func NewSSEDecoder(r io.Reader) *Decoder {
-	return &Decoder{reader: bufio.NewReader(r)}
+	return NewDecoderWithFormat(r, "openai_sse")
+}
+
+// NewDecoderWithFormat creates a decoder with manifest-driven format (ARCH-002).
+// Format: "openai_sse" | "anthropic_sse"
+func NewDecoderWithFormat(r io.Reader, format string) *Decoder {
+	if format == "" {
+		format = "openai_sse"
+	}
+	return &Decoder{reader: bufio.NewReader(r), format: format}
 }
 
 func (d *Decoder) Next() (Event, bool, error) {
@@ -49,11 +60,18 @@ func (d *Decoder) Next() (Event, bool, error) {
 			// Keep consuming stream; malformed chunk should not kill full session.
 			continue
 		}
-		return extractEvent(raw), true, nil
+		return d.extractEvent(raw), true, nil
 	}
 }
 
-func extractEvent(raw map[string]any) Event {
+func (d *Decoder) extractEvent(raw map[string]any) Event {
+	if d.format == "anthropic_sse" {
+		return extractEventAnthropic(raw)
+	}
+	return extractEventOpenAI(raw)
+}
+
+func extractEventOpenAI(raw map[string]any) Event {
 	ev := Event{Type: "PartialContentDelta"}
 	choices, ok := raw["choices"].([]any)
 	if !ok || len(choices) == 0 {
@@ -76,6 +94,33 @@ func extractEvent(raw map[string]any) Event {
 	if tools, ok := delta["tool_calls"]; ok {
 		ev.ToolCall = tools
 		ev.Type = "ToolCallDelta"
+	}
+	return ev
+}
+
+func extractEventAnthropic(raw map[string]any) Event {
+	ev := Event{Type: "PartialContentDelta"}
+	evType, _ := raw["type"].(string)
+	switch evType {
+	case "content_block_delta":
+		delta, _ := raw["delta"].(map[string]any)
+		if dt, _ := delta["type"].(string); dt == "text_delta" {
+			if text, ok := delta["text"].(string); ok {
+				ev.Delta = text
+			}
+		} else if dt == "input_json_delta" {
+			if pj, ok := delta["partial_json"].(string); ok {
+				ev.Delta = pj
+				ev.Type = "ToolCallDelta"
+				ev.ToolCall = map[string]any{"function": map[string]any{"arguments": pj}}
+			}
+		}
+	case "message_delta":
+		delta, _ := raw["delta"].(map[string]any)
+		if sr, ok := delta["stop_reason"].(string); ok {
+			ev.FinishReason = sr
+			ev.Type = "StreamEnd"
+		}
 	}
 	return ev
 }
