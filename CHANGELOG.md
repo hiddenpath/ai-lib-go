@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-03-12
+
+### Fixed
+
+- **Version governance correction**: Retracted accidental `v0.0.1` in `go.mod`.
+- **Release baseline clarity**: Canonical runtime baseline remains `v0.5.x` for continuing iterations.
+
+### Notes
+
+- If you previously consumed `v0.0.1`, upgrade to `v0.5.1` or newer.
+- This release does not change public API semantics; it closes versioning inconsistency.
+
 ### Changed (2026-03-11, GO-001 Constitution Compliance)
 
 - **ARCH-002**: Manifest-driven streaming decoder — `StreamingDecoderFormat()`, `NewDecoderWithFormat()` support openai_sse and anthropic_sse.
