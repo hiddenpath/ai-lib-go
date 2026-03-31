@@ -69,16 +69,13 @@ func (c *client) Close() error {
 	return nil
 }
 
-func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*ChatResponse, error) {
-	if len(messages) == 0 {
-		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "messages must not be empty"}
-	}
-	if opts == nil {
-		opts = &ChatOptions{}
-	}
+func buildChatPayload(messages []Message, opts *ChatOptions, stream bool) map[string]any {
 	payload := map[string]any{
 		"messages": messages,
-		"stream":   false,
+		"stream":   stream,
+	}
+	if opts == nil {
+		return payload
 	}
 	if opts.Model != "" {
 		payload["model"] = opts.Model
@@ -98,6 +95,26 @@ func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions
 	if opts.ToolChoice != nil {
 		payload["tool_choice"] = opts.ToolChoice
 	}
+	if opts.ResponseFormat != nil {
+		payload["response_format"] = opts.ResponseFormat
+	}
+	if opts.User != "" {
+		payload["user"] = opts.User
+	}
+	if len(opts.Metadata) > 0 {
+		payload["metadata"] = opts.Metadata
+	}
+	return payload
+}
+
+func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*ChatResponse, error) {
+	if len(messages) == 0 {
+		return nil, &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "messages must not be empty"}
+	}
+	if opts == nil {
+		opts = &ChatOptions{}
+	}
+	payload := buildChatPayload(messages, opts, false)
 
 	path, method := protocol.EndpointFor(c.manifest, "chat_completions", "/chat/completions")
 	var out ChatResponse
@@ -114,13 +131,7 @@ func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatO
 	if opts == nil {
 		opts = &ChatOptions{}
 	}
-	payload := map[string]any{
-		"messages": messages,
-		"stream":   true,
-	}
-	if opts.Model != "" {
-		payload["model"] = opts.Model
-	}
+	payload := buildChatPayload(messages, opts, true)
 	path, method := protocol.EndpointFor(c.manifest, "chat_completions", "/chat/completions")
 	req, err := c.newRequest(ctx, method, path, payload)
 	if err != nil {
