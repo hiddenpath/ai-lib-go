@@ -2,6 +2,7 @@ package ailib
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +65,117 @@ func TestClientChatStream(t *testing.T) {
 	}
 	if st.Event().Delta != "he" {
 		t.Fatalf("delta mismatch: %q", st.Event().Delta)
+	}
+}
+
+func TestClientChatParsesExtendedUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"id":"r1",
+			"model":"m1",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}],
+			"usage":{
+				"prompt_tokens":10,
+				"completion_tokens":5,
+				"total_tokens":15,
+				"reasoning_tokens":3,
+				"cache_read_input_tokens":2,
+				"cache_creation_input_tokens":1,
+				"completion_tokens_details":{"reasoning_tokens":3}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	c, err := NewClientBuilder().WithBaseURL(srv.URL).Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	defer c.Close()
+
+	resp, err := c.Chat(context.Background(), []Message{{Role: RoleUser, Content: "hello"}}, &ChatOptions{Model: "m1"})
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if resp.Usage == nil {
+		t.Fatalf("expected usage")
+	}
+	if resp.Usage.ReasoningTokens != 3 {
+		t.Fatalf("reasoning_tokens mismatch: %d", resp.Usage.ReasoningTokens)
+	}
+	if resp.Usage.CacheReadTokens != 2 || resp.Usage.CacheCreationTokens != 1 {
+		t.Fatalf("cache token mismatch: %+v", resp.Usage)
+	}
+	if resp.Usage.CompletionDetails == nil || resp.Usage.CompletionDetails.ReasoningTokens != 3 {
+		t.Fatalf("completion token details mismatch: %+v", resp.Usage.CompletionDetails)
+	}
+}
+
+func TestClientChatStreamUsesFullChatPayload(t *testing.T) {
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	temp := 0.7
+	maxTokens := 128
+	topP := 0.9
+	opts := &ChatOptions{
+		Model:       "m1",
+		Temperature: &temp,
+		MaxTokens:   &maxTokens,
+		TopP:        &topP,
+		Tools: []ToolDefinition{{
+			Type: "function",
+			Function: FunctionSpec{
+				Name:        "weather",
+				Description: "Get weather",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		}},
+		ToolChoice:     map[string]any{"type": "auto"},
+		ResponseFormat: map[string]any{"type": "json_object"},
+		User:           "user-a",
+		Metadata:       map[string]any{"trace_id": "t-1"},
+	}
+
+	c, err := NewClientBuilder().WithBaseURL(srv.URL).Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	defer c.Close()
+
+	st, err := c.ChatStream(context.Background(), []Message{{Role: RoleUser, Content: "hello"}}, opts)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer st.Close()
+	if !st.Next() {
+		t.Fatalf("expected streaming event")
+	}
+	if payload["temperature"] != temp || payload["max_tokens"] != float64(maxTokens) || payload["top_p"] != topP {
+		t.Fatalf("missing numeric options in payload: %+v", payload)
+	}
+	if _, ok := payload["tools"]; !ok {
+		t.Fatalf("missing tools in payload: %+v", payload)
+	}
+	if _, ok := payload["tool_choice"]; !ok {
+		t.Fatalf("missing tool_choice in payload: %+v", payload)
+	}
+	if _, ok := payload["response_format"]; !ok {
+		t.Fatalf("missing response_format in payload: %+v", payload)
+	}
+	if payload["user"] != "user-a" {
+		t.Fatalf("missing user in payload: %+v", payload)
+	}
+	if _, ok := payload["metadata"]; !ok {
+		t.Fatalf("missing metadata in payload: %+v", payload)
 	}
 }
 

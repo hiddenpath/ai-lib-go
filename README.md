@@ -3,7 +3,7 @@
 **Official Go Runtime for AI-Protocol** - A high-performance, idiomatic Go implementation for unified AI model interaction.
 
 [![Go 1.21+](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev/)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)](LICENSE-MIT)
 
 ## 🎯 Design Philosophy
 
@@ -41,7 +41,7 @@ import (
 
 func main() {
 	client, err := ailib.NewClientBuilder().
-		WithProtocolData([]byte(manifestYAML)).
+		WithBaseURL("https://api.openai.com/v1").
 		WithAPIKey(os.Getenv("OPENAI_API_KEY")).
 		Build()
 	if err != nil {
@@ -128,7 +128,7 @@ Cross-runtime behavioral consistency is verified by a shared YAML-based test sui
 
 ```bash
 # Run unit tests
-go test ./pkg/ailib/...
+go test ./...
 
 # Run compliance tests (requires ai-protocol in workspace or COMPLIANCE_DIR)
 COMPLIANCE_DIR=../ai-protocol/tests/compliance go test ./tests/compliance/...
