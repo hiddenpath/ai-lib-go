@@ -61,6 +61,8 @@ type ChatResponse struct {
 	Model   string   `json:"model"`
 	Choices []Choice `json:"choices"`
 	Usage   *Usage   `json:"usage,omitempty"`
+	// ExecutionMetadata is populated by E-layer Client.Chat on success (PT-071 / schemas/v2/execution-metadata.json).
+	ExecutionMetadata ExecutionMetadata `json:"execution_metadata"`
 }
 
 type Choice struct {
@@ -101,6 +103,8 @@ type Stream interface {
 	Event() StreamingEvent
 	Err() error
 	Close() error
+	// ExecutionMetadata is available after Close() on successful streams (Err() nil before Close).
+	ExecutionMetadata() (ExecutionMetadata, bool)
 }
 
 type Client interface {

@@ -456,3 +456,18 @@ func StreamingDecoderFormat(m any) string {
 	}
 	return "openai_sse"
 }
+
+// ManifestProviderID returns the manifest `id` field when m is a typed V1/V2 manifest, else "".
+func ManifestProviderID(m any) string {
+	if m == nil {
+		return ""
+	}
+	switch v := m.(type) {
+	case *V2Manifest:
+		return v.ID
+	case *V1Manifest:
+		return v.ID
+	default:
+		return ""
+	}
+}

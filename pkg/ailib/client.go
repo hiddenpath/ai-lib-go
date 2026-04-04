@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ailib-official/ai-lib-go/internal/protocol"
 	"github.com/ailib-official/ai-lib-go/internal/resilience"
@@ -114,12 +115,32 @@ func (c *client) Chat(ctx context.Context, messages []Message, opts *ChatOptions
 	if opts == nil {
 		opts = &ChatOptions{}
 	}
+	t0 := time.Now()
 	payload := buildChatPayload(messages, opts, false)
 
 	path, method := protocol.EndpointFor(c.manifest, "chat_completions", "/chat/completions")
-	var out ChatResponse
-	if err := c.sendJSON(ctx, method, path, payload, &out); err != nil {
+	tTrans := time.Now()
+	req, err := c.newRequest(ctx, method, path, payload)
+	if err != nil {
 		return nil, err
+	}
+	var out ChatResponse
+	attempts, err := c.execute(req, &out)
+	if err != nil {
+		return nil, err
+	}
+	tEnd := time.Now()
+	modelID := opts.Model
+	if modelID == "" {
+		modelID = out.Model
+	}
+	out.ExecutionMetadata = ExecutionMetadata{
+		ProviderID:           protocol.ManifestProviderID(c.manifest),
+		ModelID:              modelID,
+		ExecutionLatencyMs:   uint64(tEnd.Sub(t0).Milliseconds()),
+		TranslationLatencyMs:   uint64(tTrans.Sub(t0).Milliseconds()),
+		MicroRetryCount:      microRetriesFromAttempts(attempts),
+		Usage:                chatUsageToExecutionUsage(out.Usage),
 	}
 	return &out, nil
 }
@@ -137,6 +158,7 @@ func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatO
 	if err != nil {
 		return nil, err
 	}
+	t0 := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -145,13 +167,19 @@ func (c *client) ChatStream(ctx context.Context, messages []Message, opts *ChatO
 		defer resp.Body.Close()
 		return nil, parseHTTPError(c.manifest, resp)
 	}
+	tTrans := time.Now()
 	format := "openai_sse"
 	if c.manifest != nil {
 		format = protocol.StreamingDecoderFormat(c.manifest)
 	}
+	modelID := opts.Model
 	return &sseStream{
-		body:    resp.Body,
-		decoder: stream.NewDecoderWithFormat(resp.Body, format),
+		body:             resp.Body,
+		decoder:          stream.NewDecoderWithFormat(resp.Body, format),
+		started:          t0,
+		transDone:        tTrans,
+		providerID:       protocol.ManifestProviderID(c.manifest),
+		requestedModelID: modelID,
 	}, nil
 }
 
@@ -193,7 +221,7 @@ func (c *client) BatchGet(ctx context.Context, batchID string) (*BatchJob, error
 		return nil, err
 	}
 	var out BatchJob
-	if err := c.execute(req, &out); err != nil {
+	if _, err := c.execute(req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -349,7 +377,7 @@ func (c *client) VideoGet(ctx context.Context, jobID string) (*VideoJob, error) 
 		return nil, err
 	}
 	var out VideoJob
-	if err := c.execute(req, &out); err != nil {
+	if _, err := c.execute(req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -360,7 +388,8 @@ func (c *client) sendJSON(ctx context.Context, method, path string, payload any,
 	if err != nil {
 		return err
 	}
-	return c.execute(req, out)
+	_, err = c.execute(req, out)
+	return err
 }
 
 func (c *client) newRequest(ctx context.Context, method, path string, payload any) (*http.Request, error) {
@@ -401,7 +430,7 @@ func (c *client) setHeaders(req *http.Request) {
 	req.Header.Set(name, prefix+c.apiKey)
 }
 
-func (c *client) execute(req *http.Request, out any) error {
+func (c *client) execute(req *http.Request, out any) (attempts int, err error) {
 	ctx := req.Context()
 	p := resilience.DefaultPolicy()
 	if c.maxRetries > 0 {
@@ -410,7 +439,7 @@ func (c *client) execute(req *http.Request, out any) error {
 		p.MaxAttempts = m
 	}
 
-	return resilience.Execute(ctx, p, func(_ context.Context) error {
+	return resilience.ExecuteAttempts(ctx, p, func(_ context.Context) error {
 		resp, err := c.http.Do(req)
 		if err != nil {
 			return err
@@ -480,14 +509,6 @@ func isRetryableErr(err error) bool {
 	return IsRetryableCode(e.Code)
 }
 
-func isFallbackableErr(err error) bool {
-	e, ok := err.(*APIError)
-	if !ok {
-		return true
-	}
-	return IsFallbackableCode(e.Code)
-}
-
 func validateRequestMeta(method, path string) error {
 	if path == "" || !strings.HasPrefix(path, "/") {
 		return &APIError{Code: ErrInvalidRequest, StatusCode: 400, Message: "endpoint path must start with /"}
@@ -536,11 +557,53 @@ func classifyProviderErrorCode(defaultCode string, body []byte) (string, bool) {
 	}
 }
 
+func microRetriesFromAttempts(attempts int) uint8 {
+	if attempts <= 1 {
+		return 0
+	}
+	r := attempts - 1
+	if r > 255 {
+		return 255
+	}
+	return uint8(r)
+}
+
+func chatUsageToExecutionUsage(u *Usage) *ExecutionUsage {
+	if u == nil {
+		return nil
+	}
+	out := &ExecutionUsage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.ReasoningTokens != 0 {
+		v := u.ReasoningTokens
+		out.ReasoningTokens = &v
+	}
+	if u.CacheReadTokens != 0 {
+		v := u.CacheReadTokens
+		out.CacheReadTokens = &v
+	}
+	if u.CacheCreationTokens != 0 {
+		v := u.CacheCreationTokens
+		out.CacheCreationTokens = &v
+	}
+	return out
+}
+
 type sseStream struct {
-	body    io.ReadCloser
-	decoder *stream.Decoder
-	current StreamingEvent
-	err     error
+	body             io.ReadCloser
+	decoder          *stream.Decoder
+	current          StreamingEvent
+	err              error
+	started          time.Time
+	transDone        time.Time
+	providerID       string
+	requestedModelID string
+	closed           bool
+	meta             ExecutionMetadata
+	metaFilled       bool
 }
 
 func (s *sseStream) Next() bool {
@@ -562,4 +625,34 @@ func (s *sseStream) Next() bool {
 
 func (s *sseStream) Event() StreamingEvent { return s.current }
 func (s *sseStream) Err() error            { return s.err }
-func (s *sseStream) Close() error          { return s.body.Close() }
+
+func (s *sseStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	err := s.body.Close()
+	s.fillExecutionMetadata(time.Now())
+	return err
+}
+
+func (s *sseStream) fillExecutionMetadata(end time.Time) {
+	if s.metaFilled {
+		return
+	}
+	s.metaFilled = true
+	s.meta = ExecutionMetadata{
+		ProviderID:           s.providerID,
+		ModelID:              s.requestedModelID,
+		ExecutionLatencyMs:   uint64(end.Sub(s.started).Milliseconds()),
+		TranslationLatencyMs: uint64(s.transDone.Sub(s.started).Milliseconds()),
+		MicroRetryCount:      0,
+	}
+}
+
+func (s *sseStream) ExecutionMetadata() (ExecutionMetadata, bool) {
+	if !s.closed {
+		return ExecutionMetadata{}, false
+	}
+	return s.meta, s.metaFilled
+}
