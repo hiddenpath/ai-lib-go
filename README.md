@@ -155,8 +155,9 @@ client, _ := ailib.NewClientBuilder().
 
 - `internal/protocol` — manifest model/loader, capability metadata, streaming decoder format
 - `internal/stream` — SSE decoding (openai_sse, anthropic_sse)
-- `internal/resilience` — retry and backoff utilities
-- `pkg/ailib` — public SDK API (`Client`, `ClientBuilder`, capabilities, `FallbackClient`)
+- `internal/resilience` — bounded transport retry / backoff (execution layer)
+- `pkg/ailib` — public execution-layer SDK (`Client`, `ClientBuilder`, capabilities)
+- `pkg/contact` — policy-layer helpers (`FallbackClient` for multi-provider failover)
 - `tests/compliance` — fixture-driven compliance runner
 
 ## 🗺️ Ecosystem

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Client.Chat` populates `ChatResponse.ExecutionMetadata` (aligned with `schemas/v2/execution-metadata.json`); streaming exposes metadata via `Stream.ExecutionMetadata()` after `Close()`.
+- `internal/resilience.ExecuteAttempts` for accurate `micro_retry_count` reporting.
+- `internal/protocol.ManifestProviderID` helper.
+- Policy-layer `pkg/contact` with `FallbackClient` (moved from `pkg/ailib`); implements `ailib.Client`.
+- Tests: `pkg/ailib/client_execution_metadata_test.go`, `internal/resilience/retry_test.go`, `pkg/contact/fallback_test.go`.
+- Tests for `ExecutionMetadata` / `ExecutionResult` JSON round-trip (`pkg/ailib/execution_result_test.go`).
+- E/P boundary types: `ExecutionResult`, `ExecutionMetadata`, `ExecutionUsage` (`pkg/ailib/execution_result.go`).
+
+### Changed
+
+- **Breaking:** `FallbackClient` / `FallbackPolicy` / `NewFallbackClient*` removed from `pkg/ailib` — import `github.com/ailib-official/ai-lib-go/pkg/contact` instead.
+- `Stream` interface now requires `ExecutionMetadata() (ExecutionMetadata, bool)`.
+
 ## [v0.5.1] - 2026-03-12
 
 ### Fixed
