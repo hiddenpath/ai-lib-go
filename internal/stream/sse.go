@@ -15,6 +15,13 @@ type Event struct {
 	Delta        string
 	FinishReason string
 	ToolCall     any
+	Usage        *EventUsage
+}
+
+type EventUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type Decoder struct {
@@ -73,6 +80,21 @@ func (d *Decoder) extractEvent(raw map[string]any) Event {
 
 func extractEventOpenAI(raw map[string]any) Event {
 	ev := Event{Type: "PartialContentDelta"}
+
+	if uRaw, ok := raw["usage"].(map[string]any); ok {
+		eu := &EventUsage{}
+		if v, ok := uRaw["prompt_tokens"].(float64); ok {
+			eu.PromptTokens = int(v)
+		}
+		if v, ok := uRaw["completion_tokens"].(float64); ok {
+			eu.CompletionTokens = int(v)
+		}
+		if v, ok := uRaw["total_tokens"].(float64); ok {
+			eu.TotalTokens = int(v)
+		}
+		ev.Usage = eu
+	}
+
 	choices, ok := raw["choices"].([]any)
 	if !ok || len(choices) == 0 {
 		return ev

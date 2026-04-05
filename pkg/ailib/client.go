@@ -604,6 +604,7 @@ type sseStream struct {
 	closed           bool
 	meta             ExecutionMetadata
 	metaFilled       bool
+	lastUsage        *stream.EventUsage
 }
 
 func (s *sseStream) Next() bool {
@@ -619,6 +620,9 @@ func (s *sseStream) Next() bool {
 		Type:         ev.Type,
 		Delta:        ev.Delta,
 		FinishReason: ev.FinishReason,
+	}
+	if ev.Usage != nil {
+		s.lastUsage = ev.Usage
 	}
 	return true
 }
@@ -647,6 +651,13 @@ func (s *sseStream) fillExecutionMetadata(end time.Time) {
 		ExecutionLatencyMs:   uint64(end.Sub(s.started).Milliseconds()),
 		TranslationLatencyMs: uint64(s.transDone.Sub(s.started).Milliseconds()),
 		MicroRetryCount:      0,
+	}
+	if u := s.lastUsage; u != nil {
+		s.meta.Usage = &ExecutionUsage{
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.TotalTokens,
+		}
 	}
 }
 
